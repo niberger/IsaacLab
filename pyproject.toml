@@ -54,7 +54,7 @@ build-backend = "hatchling.build"
 # Include all of the source code and apps in the wheel, matching
 # the NVIDIA pip package
 [tool.hatch.build.targets.wheel]
-include = ["apps", "source", "isaaclab/__init__.py"]
+include = ["apps", "source", "isaaclab/__init__.py", "isaaclab/__main__.py"]
 exclude = ["docs"]
 
 # Rewrite paths to match the NVIDIA pip package
