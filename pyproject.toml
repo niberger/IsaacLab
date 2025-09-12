@@ -1,3 +1,67 @@
+[project]
+name = "isaaclab"
+version = "2.2.1"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy<2",
+    "torch>=2.7",
+    "onnx>=1.18.0",
+    "prettytable==3.3.0",
+    "toml",
+    "hidapi==0.14.0.post2",
+    "gymnasium==1.2.0",
+    "trimesh",
+    "pyglet<2",
+    "transformers",
+    "einops",
+    "warp-lang",
+    "pillow==11.2.1",
+    "starlette==0.45.3",
+    "pytest",
+    "pytest-mock",
+    "junitparser",
+    "flatdict==4.0.1",
+    "flaky",
+    "numpy<2",
+    "torch>=2.7",
+    "torchvision>=0.14.1",
+    "protobuf!=5.26.0,>=4.25.8",
+    "hydra-core",
+    "h5py",
+    "tensorboard",
+    "moviepy",
+    "pillow==11.2.1",
+    "numpy<2",
+    "torch>=2.7",
+    "torchvision>=0.14.1",
+    "protobuf!=5.26.0,>=4.25.8",
+    "tensorboard",
+    "scikit-learn",
+    "numba"
+]
+
+[project.optional-dependencies]
+isaacsim = ["isaacsim[all,extscache]==5.0.0.*"]
+sb3 = ["stable-baselines3>=2.6", "tqdm", "rich"]
+skrl = ["skrl>=1.4.3"]
+rsl-rl = ["rsl-rl-lib==2.3.3"]
+all = ["stable-baselines3>=2.6", "skrl>=1.4.3", "rsl-rl-lib==2.3.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Include all of the source code and apps in the wheel, matching
+# the NVIDIA pip package
+[tool.hatch.build.targets.wheel]
+include = ["apps", "source", "isaaclab/__init__.py"]
+exclude = ["docs"]
+
+# Rewrite paths to match the NVIDIA pip package
+[tool.hatch.build.targets.wheel.sources]
+"apps" = "isaaclab/apps"
+"source" = "isaaclab/source"
+
 [tool.isort]
 
 py_version = 310
