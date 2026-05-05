@@ -3,23 +3,29 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Tests for the Newton JointWrenchSensor."""
+"""Launch Isaac Sim Simulator first."""
 
-import sys
-from pathlib import Path
+from isaaclab.app import AppLauncher
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# launch omniverse app
+simulation_app = AppLauncher(headless=True).app
+
+"""Rest everything follows."""
+
+import math
 
 import pytest
 import torch
 import warp as wp
-from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
+from isaaclab_physx.physics import PhysxCfg
+
+from pxr import Gf, UsdPhysics
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import Articulation, ArticulationCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-from isaaclab.sensors.joint_wrench import JointWrenchSensor, JointWrenchSensorCfg
+from isaaclab.sensors import JointWrenchSensor, JointWrenchSensorCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
@@ -116,17 +122,70 @@ class _NestedRootAntSceneCfg(InteractiveSceneCfg):
 
 @pytest.fixture
 def sim():
-    """Simulation context using the Newton backend."""
+    """Simulation context using the PhysX backend."""
     sim_cfg = SimulationCfg(
-        dt=1.0 / 200.0,
-        physics=NewtonCfg(
-            solver_cfg=MJWarpSolverCfg(),
-            num_substeps=1,
-        ),
+        dt=1.0 / 120.0,
+        physics=PhysxCfg(),
     )
     with sim_utils.build_simulation_context(sim_cfg=sim_cfg) as sim_ctx:
         sim_ctx._app_control_on_stop_handle = None
         yield sim_ctx
+
+
+def _physx_incoming_joint_wrench(sensor: JointWrenchSensor) -> torch.Tensor:
+    """Read the raw PhysX incoming joint wrench tensor.
+
+    PhysX reports spatial vectors as force followed by torque. Shape is
+    ``(num_envs, num_bodies, 6)``.
+    """
+    raw_wrench = sensor._root_view.get_link_incoming_joint_force().view(wp.spatial_vectorf)
+    return wp.to_torch(raw_wrench)
+
+
+def _assert_sensor_matches_physx_tensor(sensor: JointWrenchSensor) -> None:
+    """Compare sensor buffers to the raw PhysX tensor transformed into joint frames."""
+    raw_wrench = _physx_incoming_joint_wrench(sensor)
+    sensor_data = sensor.data
+
+    expected_force, expected_torque = _physx_incoming_joint_wrench_in_joint_frame(sensor, raw_wrench)
+    torch.testing.assert_close(sensor_data.force.torch, expected_force)
+    torch.testing.assert_close(sensor_data.torque.torch, expected_torque)
+
+
+def _physx_incoming_joint_wrench_in_joint_frame(
+    sensor: JointWrenchSensor, raw_wrench: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Transform raw PhysX body-frame incoming joint wrenches into the configured convention."""
+    force_b = raw_wrench[..., :3]
+    torque_b = raw_wrench[..., 3:]
+    joint_pos_b = wp.to_torch(sensor._joint_pos_b).unsqueeze(0)
+    joint_quat_b = wp.to_torch(sensor._joint_quat_b).unsqueeze(0)
+    torque_joint_anchor_b = torque_b - torch.cross(joint_pos_b.expand_as(force_b), force_b, dim=-1)
+
+    flat_joint_quat_b = joint_quat_b.expand_as(raw_wrench[..., :4]).reshape(-1, 4)
+    expected_force = math_utils.quat_apply_inverse(flat_joint_quat_b, force_b.reshape(-1, 3)).reshape(force_b.shape)
+    expected_torque = math_utils.quat_apply_inverse(flat_joint_quat_b, torque_joint_anchor_b.reshape(-1, 3)).reshape(
+        torque_b.shape
+    )
+    return expected_force, expected_torque
+
+
+def _set_child_joint_frame(scene: InteractiveScene, child_body_name: str) -> None:
+    """Set a non-identity child-side joint frame for the requested body in env 0."""
+    for prim in scene.stage.Traverse():
+        if not prim.GetPath().pathString.startswith("/World/envs/env_0/Robot"):
+            continue
+        joint = UsdPhysics.Joint(prim)
+        if joint and any(target.name == child_body_name for target in joint.GetBody1Rel().GetTargets()):
+            joint.GetLocalPos1Attr().Set(Gf.Vec3f(0.25, -0.15, 0.1))
+            joint.GetLocalRot1Attr().Set(
+                Gf.Quatf(
+                    math.cos(math.pi / 4.0),
+                    Gf.Vec3f(math.sin(math.pi / 4.0), 0.0, 0.0),
+                )
+            )
+            return
+    raise RuntimeError(f"Failed to find a USD joint with child body '{child_body_name}'.")
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +195,7 @@ def sim():
 
 def test_data_before_init_is_none():
     """``force``/``torque`` return ``None`` before :meth:`create_buffers` runs."""
-    from isaaclab_newton.sensors.joint_wrench import JointWrenchSensorData
+    from isaaclab_physx.sensors.joint_wrench import JointWrenchSensorData
 
     data = JointWrenchSensorData()
     assert data.force is None
@@ -153,33 +212,38 @@ def test_initialization_and_shapes(sim):
     scene = InteractiveScene(_SingleJointSceneCfg(num_envs=2))
     sim.reset()
 
+    robot: Articulation = scene["robot"]
     sensor: JointWrenchSensor = scene["wrench"]
     sim.step()
     scene.update(sim.get_physics_dt())
 
-    # revolute_articulation has one joint whose child is "Arm".
+    # PhysX reports one incoming joint wrench per articulation link, including the root link.
     num_envs = 2
-    num_joints = 1
-    assert sensor.data.force.torch.shape == (num_envs, num_joints, 3)
-    assert sensor.data.torque.torch.shape == (num_envs, num_joints, 3)
-    assert sensor.body_names == ["Arm"]
+    num_bodies = robot.num_bodies
+    assert sensor.data.force.torch.shape == (num_envs, num_bodies, 3)
+    assert sensor.data.torque.torch.shape == (num_envs, num_bodies, 3)
+    assert sensor.body_names == robot.body_names
+    assert sensor.find_bodies("Arm") == ([robot.body_names.index("Arm")], ["Arm"])
+    _assert_sensor_matches_physx_tensor(sensor)
 
 
 def test_multi_body_articulation(sim):
-    """Cartpole (2 joints) exposes a wrench for each joint labelled by its child body."""
+    """Cartpole exposes a wrench for each link labelled by body name."""
     scene = InteractiveScene(_CartpoleSceneCfg(num_envs=2))
     sim.reset()
 
+    robot: Articulation = scene["robot"]
     sensor: JointWrenchSensor = scene["wrench"]
     sim.step()
     scene.update(sim.get_physics_dt())
 
     num_envs = 2
-    num_joints = 2
-    assert sensor.data.force.torch.shape == (num_envs, num_joints, 3)
-    assert sensor.data.torque.torch.shape == (num_envs, num_joints, 3)
-    assert len(sensor.body_names) == 2
-    assert "rail" not in [n.lower() for n in sensor.body_names]
+    num_bodies = robot.num_bodies
+    assert sensor.data.force.torch.shape == (num_envs, num_bodies, 3)
+    assert sensor.data.torque.torch.shape == (num_envs, num_bodies, 3)
+    assert sensor.body_names == robot.body_names
+    assert len(sensor.body_names) == num_bodies
+    _assert_sensor_matches_physx_tensor(sensor)
 
 
 def test_nested_articulation_root_resolution(sim):
@@ -192,10 +256,10 @@ def test_nested_articulation_root_resolution(sim):
     sim.step()
     scene.update(sim.get_physics_dt())
 
-    assert len(sensor.body_names) == robot.num_joints
-    assert set(sensor.body_names).issubset(set(robot.body_names))
-    assert sensor.data.force.torch.shape == (1, robot.num_joints, 3)
-    assert sensor.data.torque.torch.shape == (1, robot.num_joints, 3)
+    assert sensor.body_names == robot.body_names
+    assert sensor.data.force.torch.shape == (1, robot.num_bodies, 3)
+    assert sensor.data.torque.torch.shape == (1, robot.num_bodies, 3)
+    _assert_sensor_matches_physx_tensor(sensor)
 
 
 # ---------------------------------------------------------------------------
@@ -203,117 +267,8 @@ def test_nested_articulation_root_resolution(sim):
 # ---------------------------------------------------------------------------
 
 
-def _compute_expected_wrench_in_joint_frame(
-    sensor,
-    robot,
-    env: int,
-    joint: int,
-    gravity: torch.Tensor,
-    ext_force_b: torch.Tensor | None = None,
-    ext_torque_b: torch.Tensor | None = None,
-    descendant_body_names: list[str] | None = None,
-):
-    """Compute the analytical joint-frame wrench for a single joint.
-
-    Uses the same geometric data (body_com, joint_X_c, body_q) and frame
-    transformations as the kernel, but computes the wrench analytically from
-    known loads rather than reading body_parent_f.  Computes the moment of
-    forces about the joint anchor and rotates the result into the child-side
-    joint frame.
-
-    For terminal links, the wrench is due to the child body alone.  For
-    interior joints, pass all bodies in the subtree below the joint via
-    ``descendant_body_names`` so the helper sums their gravitational
-    contributions.
-
-    Args:
-        sensor: The JointWrenchSensor instance (used to read Newton model bindings).
-        robot: The Articulation asset (used for body mass lookup).
-        env: Environment index.
-        joint: Joint index within the sensor.
-        gravity: Gravity vector in world frame, shape (3,).
-        ext_force_b: External force on the child body in body frame [N], shape (3,).
-        ext_torque_b: External torque on the child body in body frame [N·m], shape (3,).
-        descendant_body_names: Bodies whose gravitational load acts through this
-            joint.  Defaults to the child body only (correct for terminal links).
-            For an interior joint, pass all bodies in the subtree below the joint.
-
-    Returns:
-        A tuple of (force, torque) tensors, each shape (3,), in the child-side
-        joint frame.
-    """
-    body_idx = wp.to_torch(sensor._joint_child)[joint].item()
-
-    # Link transform in world (of the child body — defines the joint frame).
-    link_xform = wp.to_torch(sensor._sim_bind_body_q)[env, body_idx]  # (7,) = pos(3) + quat(4)
-    link_pos = link_xform[:3]
-    link_quat = link_xform[3:]  # wp.quatf = (x, y, z, w)
-
-    # Joint anchor and orientation in world = link_xform * joint_X_c.
-    joint_X_c = wp.to_torch(sensor._sim_bind_joint_X_c)[env, joint]  # (7,)
-    jxc_pos = joint_X_c[:3]
-    jxc_quat = joint_X_c[3:]
-    anchor_world = link_pos + math_utils.quat_apply(link_quat.unsqueeze(0), jxc_pos.unsqueeze(0)).squeeze(0)
-    joint_quat_world = math_utils.quat_mul(link_quat.unsqueeze(0), jxc_quat.unsqueeze(0)).squeeze(0)
-
-    # Bodies whose weight contributes to the wrench at this joint.
-    if descendant_body_names is None:
-        descendant_body_names = [sensor.body_names[joint]]
-
-    link_names = list(sensor._root_view.link_names)
-
-    total_force_w = torch.zeros(3, device=gravity.device)
-    total_torque_w = torch.zeros(3, device=gravity.device)
-
-    for body_name in descendant_body_names:
-        b_idx = link_names.index(body_name)
-        b_xform = wp.to_torch(sensor._sim_bind_body_q)[env, b_idx]
-        b_pos = b_xform[:3]
-        b_quat = b_xform[3:]
-        b_com_local = wp.to_torch(sensor._sim_bind_body_com)[env, b_idx]
-        b_com_world = b_pos + math_utils.quat_apply(b_quat.unsqueeze(0), b_com_local.unsqueeze(0)).squeeze(0)
-
-        art_b_idx = robot.body_names.index(body_name)
-        mass = robot.data.body_mass.torch[env, art_b_idx].item()
-        weight_w = mass * gravity
-
-        total_force_w = total_force_w + weight_w
-        r = b_com_world - anchor_world
-        total_torque_w = total_torque_w + torch.cross(r, weight_w, dim=-1)
-
-    # External force/torque on the child body only (if provided).  Actuator
-    # torque is intentionally omitted; see tolerance comment in calling tests.
-    if ext_force_b is not None:
-        ext_force_w = math_utils.quat_apply(link_quat.unsqueeze(0), ext_force_b.unsqueeze(0)).squeeze(0)
-        total_force_w = total_force_w + ext_force_w
-        # Moment of the external force about the joint anchor (applied at child COM).
-        child_com_local = wp.to_torch(sensor._sim_bind_body_com)[env, body_idx]
-        child_com_world = link_pos + math_utils.quat_apply(
-            link_quat.unsqueeze(0), child_com_local.unsqueeze(0)
-        ).squeeze(0)
-        total_torque_w = total_torque_w + torch.cross(child_com_world - anchor_world, ext_force_w, dim=-1)
-    if ext_torque_b is not None:
-        total_torque_w = total_torque_w + math_utils.quat_apply(
-            link_quat.unsqueeze(0), ext_torque_b.unsqueeze(0)
-        ).squeeze(0)
-
-    # Reaction wrench = negation of total wrench (joint supports against all loads).
-    reaction_force_w = -total_force_w
-    reaction_torque_w = -total_torque_w
-
-    # Rotate into joint frame.
-    expected_force = math_utils.quat_apply_inverse(
-        joint_quat_world.unsqueeze(0), reaction_force_w.unsqueeze(0)
-    ).squeeze(0)
-    expected_torque = math_utils.quat_apply_inverse(
-        joint_quat_world.unsqueeze(0), reaction_torque_w.unsqueeze(0)
-    ).squeeze(0)
-
-    return expected_force, expected_torque
-
-
 def test_force_and_torque_components_at_rest(sim):
-    """Component-level validation of force and torque against analytical expectations (gravity only)."""
+    """Component-level validation of force and torque against the PhysX tensor API."""
     scene = InteractiveScene(_SingleJointSceneCfg(num_envs=1))
     sim.reset()
 
@@ -323,29 +278,40 @@ def test_force_and_torque_components_at_rest(sim):
         sim.step()
         scene.update(sim.get_physics_dt())
 
-    gravity = torch.tensor(sim.cfg.gravity, device=sim.device)
-    expected_force, expected_torque = _compute_expected_wrench_in_joint_frame(
-        sensor,
-        robot,
-        env=0,
-        joint=0,
-        gravity=gravity,
-    )
+    _assert_sensor_matches_physx_tensor(sensor)
 
-    force = sensor.data.force.torch[0, 0]
-    torque = sensor.data.torque.torch[0, 0]
+    arm_idx = robot.body_names.index("Arm")
+    raw_wrench = _physx_incoming_joint_wrench(sensor)
+    assert torch.any(raw_wrench[:, arm_idx, :] != 0.0)
 
-    torch.testing.assert_close(force, expected_force, atol=1e-2, rtol=1e-3)
-    torch.testing.assert_close(torque, expected_torque, atol=1e-2, rtol=1e-3)
+
+def test_non_identity_joint_frame_transform(sim):
+    """PhysX raw body-frame wrench is converted to the child-side joint frame."""
+    scene = InteractiveScene(_SingleJointSceneCfg(num_envs=1))
+    _set_child_joint_frame(scene, "Arm")
+    sim.reset()
+
+    sensor: JointWrenchSensor = scene["wrench"]
+    robot: Articulation = scene["robot"]
+    arm_idx = robot.body_names.index("Arm")
+
+    for _ in range(400):
+        sim.step()
+        scene.update(sim.get_physics_dt())
+
+    raw_wrench = _physx_incoming_joint_wrench(sensor)
+    expected_force, expected_torque = _physx_incoming_joint_wrench_in_joint_frame(sensor, raw_wrench)
+    torch.testing.assert_close(sensor.data.force.torch, expected_force)
+    torch.testing.assert_close(sensor.data.torque.torch, expected_torque)
+
+    raw_force = raw_wrench[:, arm_idx, :3]
+    raw_torque = raw_wrench[:, arm_idx, 3:]
+    assert not torch.allclose(sensor.data.force.torch[:, arm_idx], raw_force)
+    assert not torch.allclose(sensor.data.torque.torch[:, arm_idx], raw_torque)
 
 
 def test_wrench_with_external_force_and_torque(sim):
-    """Full analytical wrench validation with external force and torque applied.
-
-    Mirrors the PhysX ``test_body_incoming_joint_wrench_b_single_joint`` pattern:
-    apply a known wrench, settle, compute the expected reaction wrench analytically,
-    and compare component-by-component.
-    """
+    """Full wrench validation with external force and torque applied."""
     scene = InteractiveScene(_SingleJointSceneCfg(num_envs=1))
     sim.reset()
 
@@ -353,7 +319,7 @@ def test_wrench_with_external_force_and_torque(sim):
     robot: Articulation = scene["robot"]
     arm_idx = robot.body_names.index("Arm")
 
-    # Apply 10 N in body-Y and 10 N·m in body-Z on the arm (matches PhysX test).
+    # Apply 10 N in body-Y and 10 N·m in body-Z on the arm (matches Newton test).
     ext_force_b = torch.zeros((1, robot.num_bodies, 3), device=sim.device)
     ext_force_b[:, arm_idx, 1] = 10.0
     ext_torque_b = torch.zeros((1, robot.num_bodies, 3), device=sim.device)
@@ -365,34 +331,19 @@ def test_wrench_with_external_force_and_torque(sim):
         sim.step()
         scene.update(sim.get_physics_dt())
 
-    gravity = torch.tensor(sim.cfg.gravity, device=sim.device)
-    expected_force, expected_torque = _compute_expected_wrench_in_joint_frame(
-        sensor,
-        robot,
-        env=0,
-        joint=0,
-        gravity=gravity,
-        ext_force_b=ext_force_b[0, arm_idx],
-        ext_torque_b=ext_torque_b[0, arm_idx],
-    )
+    _assert_sensor_matches_physx_tensor(sensor)
 
-    force = sensor.data.force.torch[0, 0]
-    torque = sensor.data.torque.torch[0, 0]
-
-    # The PD actuator contributes a small torque (~0.1 N·m) to body_parent_f that is
-    # not modelled in the analytical helper.  Force is unaffected (actuator is pure torque).
-    torch.testing.assert_close(force, expected_force, atol=1e-2, rtol=1e-3)
-    torch.testing.assert_close(torque, expected_torque, atol=0.15, rtol=1e-2)
+    raw_wrench = _physx_incoming_joint_wrench(sensor)
+    assert torch.any(raw_wrench[:, arm_idx, :] != 0.0)
 
 
 def test_interior_joint_wrench_at_rest(sim):
-    """Interior joint wrench accounts for the weight of all descendant bodies.
+    """Interior joint wrench matches the raw PhysX incoming-joint tensor.
 
-    The cartpole has two joints: ``slider_to_cart`` (interior, supports cart
-    and pole) and ``cart_to_pole`` (terminal, supports pole only).  At steady
-    state with gravity as the only load, the reaction wrench at the interior
-    joint must equal the combined weight of cart and pole, with torque
-    computed from each body's moment about the joint anchor.
+    The cartpole has an interior joint (``slider_to_cart``) and a terminal
+    joint (``cart_to_pole``). PhysX reports one entry for every link, so this
+    test compares all link entries, including the cart link controlled by the
+    interior joint, against the underlying tensor API.
     """
     scene = InteractiveScene(_CartpoleDampedSceneCfg(num_envs=1))
     sim.reset()
@@ -404,24 +355,11 @@ def test_interior_joint_wrench_at_rest(sim):
         sim.step()
         scene.update(sim.get_physics_dt())
 
-    gravity = torch.tensor(sim.cfg.gravity, device=sim.device)
+    _assert_sensor_matches_physx_tensor(sensor)
 
-    # Interior joint (index 0, slider_to_cart): reaction wrench supports
-    # all bodies in the subtree — both cart and pole.
-    expected_force, expected_torque = _compute_expected_wrench_in_joint_frame(
-        sensor,
-        robot,
-        env=0,
-        joint=0,
-        gravity=gravity,
-        descendant_body_names=list(sensor.body_names),
-    )
-
-    force = sensor.data.force.torch[0, 0]
-    torque = sensor.data.torque.torch[0, 0]
-
-    torch.testing.assert_close(force, expected_force, atol=1e-2, rtol=1e-3)
-    torch.testing.assert_close(torque, expected_torque, atol=1e-2, rtol=1e-3)
+    cart_idx = robot.body_names.index("cart")
+    raw_wrench = _physx_incoming_joint_wrench(sensor)
+    assert torch.any(raw_wrench[:, cart_idx, :] != 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +374,7 @@ def test_sensor_print(sim):
 
     sensor: JointWrenchSensor = scene["wrench"]
     sensor_str = str(sensor)
-    assert "newton" in sensor_str
+    assert "physx" in sensor_str
     assert "Joint wrench sensor" in sensor_str
 
 
@@ -459,7 +397,7 @@ def test_reset_zeros_buffers(sim):
 
     sensor.reset()
 
-    # Access raw buffers to skip lazy re-population from the Newton view on the next data read.
+    # Access raw buffers to skip lazy re-population from the PhysX view on the next data read.
     force_after = wp.to_torch(sensor._data._force)
     torque_after = wp.to_torch(sensor._data._torque)
     torch.testing.assert_close(force_after, torch.zeros_like(force_after))
