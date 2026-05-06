@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -6,9 +6,8 @@
 """Installation script for the 'isaaclab' python package."""
 
 import os
-import platform
-import toml
 
+import toml
 from setuptools import setup
 
 # Obtain the extension data from the extension.toml file
@@ -27,32 +26,37 @@ INSTALL_REQUIRES = [
     # devices
     "hidapi==0.14.0.post2",
     # reinforcement learning
-    "gymnasium==1.2.0",
+    "gymnasium==1.2.1",
     # procedural-generation
     "trimesh",
     "pyglet<2",
     # image processing
-    "transformers",
+    "transformers==4.57.6",
     "einops",  # needed for transformers, doesn't always auto-install
     "warp-lang",
     # make sure this is consistent with isaac sim version
-    "pillow==11.2.1",
+    "pillow==11.3.0",
     # livestream
-    "starlette==0.45.3",
+    "starlette==0.49.1",
     # testing
     "pytest",
     "pytest-mock",
     "junitparser",
-    "flatdict==4.0.1",
+    "flatdict>=4.1.0",
     "flaky",
+    "packaging",
 ]
 
-# Additional dependencies that are only available on Linux platforms
-if platform.system() == "Linux":
-    INSTALL_REQUIRES += [
-        "pin-pink==3.1.0",  # required by isaaclab.isaaclab.controllers.pink_ik
-        "dex-retargeting==0.4.6",  # required by isaaclab.devices.openxr.retargeters.humanoid.fourier.gr1_t2_dex_retargeting_utils
-    ]
+# Append Linux x86_64 and ARM64 deps via PEP 508 markers
+SUPPORTED_ARCHS_ARM = "platform_machine in 'x86_64,AMD64,aarch64,arm64'"
+SUPPORTED_ARCHS = "platform_machine in 'x86_64,AMD64'"
+INSTALL_REQUIRES += [
+    # required by isaaclab.isaaclab.controllers.pink_ik
+    f"pin-pink==3.1.0 ; platform_system == 'Linux' and ({SUPPORTED_ARCHS_ARM})",
+    f"daqp==0.7.2 ; platform_system == 'Linux' and ({SUPPORTED_ARCHS_ARM})",
+    # required by isaaclab.devices.openxr.retargeters.humanoid.fourier.gr1_t2_dex_retargeting_utils
+    f"dex-retargeting==0.4.6 ; platform_system == 'Linux' and ({SUPPORTED_ARCHS})",
+]
 
 PYTORCH_INDEX_URL = ["https://download.pytorch.org/whl/cu128"]
 
@@ -77,6 +81,7 @@ setup(
         "Programming Language :: Python :: 3.11",
         "Isaac Sim :: 4.5.0",
         "Isaac Sim :: 5.0.0",
+        "Isaac Sim :: 5.1.0",
     ],
     zip_safe=False,
 )
