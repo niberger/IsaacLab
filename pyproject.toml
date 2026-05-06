@@ -62,25 +62,6 @@ exclude = ["docs"]
 "apps" = "isaaclab/apps"
 "source" = "isaaclab/source"
 
-[tool.isort]
-
-py_version = 310
-line_length = 120
-group_by_package = true
-
-# Files to skip
-skip_glob = ["docs/*", "logs/*", "_isaac_sim/*", ".vscode/*"]
-
-# Order of imports
-sections = [
-    "FUTURE",
-    "STDLIB",
-    "THIRDPARTY",
-    "ASSETS_FIRSTPARTY",
-    "FIRSTPARTY",
-    "EXTRA_FIRSTPARTY",
-    "TASK_FIRSTPARTY",
-    "LOCALFOLDER",
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
