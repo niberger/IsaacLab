@@ -3,6 +3,59 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+[project]
+name = "isaaclab"
+version = "3.0.0-beta"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "torch",
+    "onnx",
+    "prettytable",
+    "toml",
+    "hidapi",
+    "gymnasium",
+    "trimesh",
+    "pyglet",
+    "transformers",
+    "einops",
+    "warp-lang",
+    "pillow",
+    "starlette",
+    "pytest",
+    "pytest-mock",
+    "junitparser",
+    "flatdict",
+    "flaky",
+    "torchvision",
+    "protobuf",
+    "hydra-core",
+    "h5py",
+    "tensorboard",
+    "moviepy",
+    "scikit-learn",
+    "numba",
+    "lazy-loader"
+]
+
+[project.optional-dependencies]
+isaacsim = ["isaacsim[all,extscache]==6.0.0.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Include all of the source code and apps in the wheel, matching
+# the NVIDIA pip package
+[tool.hatch.build.targets.wheel]
+include = ["apps", "source", "isaaclab/__init__.py", "isaaclab/__main__.py"]
+exclude = ["docs", "docker", "tools"]
+
+# Rewrite paths to match the NVIDIA pip package
+[tool.hatch.build.targets.wheel.sources]
+"apps" = "isaaclab/apps"
+"source" = "isaaclab/source"
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
