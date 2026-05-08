@@ -1,3 +1,13 @@
+# FORK
+
+This fork exist for easy integration of IsaacLab latest version as a pip/uv dependency, for personal use.
+```
+[tool.uv.sources]
+isaaclab = { git = "https://github.com/niberger/IsaacLab.git", branch = "nightly-build" }
+```
+
+Use it at your own risk. No garantee provided that the branch will continue to exist or be updated in the future.
+
 ![Isaac Lab](docs/source/_static/isaaclab.jpg)
 
 ---
