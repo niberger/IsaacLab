@@ -1,6 +1,48 @@
 Changelog
 ---------
 
+0.5.30 (2026-05-08)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added :class:`~isaaclab_physx.sensors.JointWrenchSensor` for reading PhysX
+  incoming joint reaction wrenches as split force [N] and torque [N·m] buffers.
+  The sensor accepts asset prim paths whose articulation root is nested below
+  the configured prim and converts PhysX's native body-frame wrench to the
+  shared child-side joint-frame convention.
+
+Changed
+^^^^^^^
+
+* Modified the isaac rtx renderer to use the new patterns from renderer/camera decoupling.
+* **Breaking:** Removed the ``sync_usd_on_fabric_write`` keyword argument from
+  :class:`~isaaclab_physx.sim.views.FabricFrameView`.  Fabric writes
+  (``set_world_poses``, ``set_scales``) now notify the renderer via
+  ``PrepareForReuse()`` on the underlying ``PrimSelection`` instead of writing
+  back to USD, which is ~200x faster and avoids the stale USD shadow state the
+  old path produced.  Callers passing ``sync_usd_on_fabric_write=True`` should
+  remove the argument; if they relied on USD reflecting Fabric writes, they
+  should now read Fabric poses directly via the view's getters or refresh USD
+  explicitly.
+
+Removed
+^^^^^^^
+
+* Removed ``ArticulationData.body_incoming_joint_wrench_b``. Add
+  :class:`~isaaclab.sensors.JointWrenchSensorCfg` to the scene and read
+  :attr:`~isaaclab.sensors.JointWrenchSensorData.force` and
+  :attr:`~isaaclab.sensors.JointWrenchSensorData.torque` instead.
+
+Fixed
+^^^^^
+
+* Fixed :class:`~isaaclab_physx.assets.SurfaceGripper` initialization on
+  non-CPU simulation backends to raise before loading the surface gripper
+  extension, avoiding hangs during startup.
+
+
 0.5.29 (2026-04-30)
 ~~~~~~~~~~~~~~~~~~~
 
